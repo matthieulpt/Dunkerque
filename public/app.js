@@ -452,9 +452,10 @@ function launch(spec) {
   home.classList.add('busy');
   reste = Math.max(0, reste - 1); showReste();
 }
-/* un carnavalier par IP (le serveur décide et revérifie) : une fois posé, le bouton laisse place au message */
+/* un carnavalier par IP (le serveur décide et revérifie) : une fois posé, le bouton laisse place au message.
+   Bouton et message restent cachés tant que le serveur n'a pas répondu : jamais de bouton cliquable par erreur */
 const joinEl = document.getElementById('join'), doneEl = document.getElementById('done');
-let reste = 1;
+let reste = 0;
 function showReste() { joinEl.hidden = !reste; doneEl.hidden = !!reste; }
 const checkReste = () => fetch('api/reste').then(r => r.json()).then(d => { reste = d.reste; showReste(); });
 checkReste().catch(() => {});

@@ -32,10 +32,11 @@ function shapeTag(sh, fill, attrs = '') {
   return `<polygon points="${sh.pts.map(p => fx(p[0]) + ',' + fx(p[1])).join(' ')}" fill="${fill}" ${attrs}/>`;
 }
 
-/* ---------- api : 404 = session expirée, la page redevient la connexion ---------- */
+/* ---------- api : 404 sur la liste des pantins = session expirée, la page redevient la connexion.
+   Seule cette route recharge : une autre route absente (serveur pas à jour) ne fait pas boucler la page ---------- */
 async function call(url, opt) {
   const r = await fetch(url, opt);
-  if (r.status === 404 && !opt) location.reload();
+  if (r.status === 404 && url === '/api/admin/pantins') location.reload();
   if (!r.ok) throw r.status;
   return r.json();
 }
