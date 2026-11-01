@@ -21,8 +21,10 @@ const ADMIN = /^\/[\w-]+$/.test(ADMIN_PATH) && !/^\/api(?:$|[\W_])/i.test(ADMIN_
 if ((ADMIN_PATH || ADMIN_PASSWORD) && !ADMIN) console.warn('Panel admin désactivé : ADMIN_PATH (ex. /mon-chemin-secret) et ADMIN_PASSWORD sont requis.');
 
 /* ---------- base ---------- */
-fs.mkdirSync(path.join(ROOT, 'data'), { recursive: true });
-const db = new DatabaseSync(path.join(ROOT, 'data', 'pantins.db'));
+/* dossier de la base : DATA_DIR, sinon le disque Railway s'il y en a un, sinon data/ */
+const DATA = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(ROOT, 'data');
+fs.mkdirSync(DATA, { recursive: true });
+const db = new DatabaseSync(path.join(DATA, 'pantins.db'));
 db.exec(`CREATE TABLE IF NOT EXISTS pantins (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
