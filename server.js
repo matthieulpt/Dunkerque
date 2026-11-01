@@ -336,3 +336,12 @@ http.createServer((req, res) => {
   if (ADMIN && (url.pathname === ADMIN_PATH || url.pathname.startsWith(ADMIN_PATH + '/'))) return adminPage(req, res, url);
   serveFile(req, res, PUB, url.pathname);
 }).listen(PORT, () => console.log(`Affiche : http://localhost:${PORT}` + (ADMIN ? ` (panel admin actif)` : '')));
+
+/* toujours allumé : Render gratuit endort le site après 15 min sans visite. Le serveur se rend visite
+   lui-même par son adresse publique toutes les 10 min (page d'accueil seulement, sans toucher à la base).
+   Render fournit RENDER_EXTERNAL_URL ; KEEP_AWAKE=0 coupe ce réveil */
+const SELF = process.env.RENDER_EXTERNAL_URL;
+if (SELF && process.env.KEEP_AWAKE !== '0') {
+  setInterval(() => fetch(SELF, { method: 'HEAD' }).catch(() => {}), +process.env.KEEP_AWAKE_MS || 10 * 60e3);
+  console.log('Réveil automatique : ' + SELF);
+}
