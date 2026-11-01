@@ -228,7 +228,7 @@ function persist(c, tries = 3) {
   fetch('api/pantins', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: c.name, mode: c.mode, parts }) })
     .then(r => r.ok ? r.json() : Promise.reject(r.status))
     .then(d => known.add(d.id))
-    .catch(() => { if (tries > 1) setTimeout(() => persist(c, tries - 1), 6000); });
+    .catch(st => { if (st !== 403 && tries > 1) setTimeout(() => persist(c, tries - 1), 6000); }); /* 403 : refusé pour de bon */
 }
 /* les pantins créés ailleurs entre-temps arrivent tous seuls, quand rien ne tombe */
 function pull() {
@@ -450,10 +450,22 @@ function launch(spec) {
   const p = c.parts[0].body.getPosition();
   Object.assign(cam, { mode: 'follow', c, x: p.x * S, y: p.y * S });
   home.classList.add('busy');
+  reste = Math.max(0, reste - 1); showReste();
 }
-document.getElementById('join').onclick = () => { if (cam.mode === 'full') { tip.hidden = true; edEl.hidden = false; fitMid(); } };
-genBtn.onclick = () => ask('Ton carnavalier est-il à ton goût ?', 'Générer', () => launch(ed.map(p => ({ ...p }))));
-document.getElementById('rnd').onclick = () => ask('Un carnavalier aléatoire va être créé. Si tu es sûr de ne pas vouloir créer le tien, appuie sur continuer.', 'Continuer', () => launch(null));
+/* un carnavalier par IP (le serveur décide et revérifie) : une fois posé, le bouton laisse place au message */
+const joinEl = document.getElementById('join'), doneEl = document.getElementById('done');
+let reste = 1;
+function showReste() { joinEl.hidden = !reste; doneEl.hidden = !!reste; }
+const checkReste = () => fetch('api/reste').then(r => r.json()).then(d => { reste = d.reste; showReste(); });
+checkReste().catch(() => {});
+/* revérifié juste avant de lancer : un autre onglet ou un autre appareil du même réseau a pu poser entre-temps */
+const go = spec => checkReste().catch(() => {}).then(() => {
+  if (reste) return launch(spec);
+  pop.hidden = true; edEl.hidden = true;
+});
+joinEl.onclick = () => { if (cam.mode === 'full' && reste) { tip.hidden = true; edEl.hidden = false; fitMid(); } };
+genBtn.onclick = () => ask('Ton carnavalier est-il à ton goût ?', 'Générer', () => go(ed.map(p => ({ ...p }))));
+document.getElementById('rnd').onclick = () => ask('Un carnavalier aléatoire va être créé. Si tu es sûr de ne pas vouloir créer le tien, appuie sur continuer.', 'Continuer', () => go(null));
 document.getElementById('yes').onclick = () => onYes();
 document.getElementById('no').onclick = () => { pop.hidden = true; };
 window.addEventListener('keydown', e => {

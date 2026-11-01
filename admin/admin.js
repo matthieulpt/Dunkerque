@@ -44,6 +44,28 @@ async function load() {
   chars = rows.map(r => ({ ...r, parts: r.parts.map(p => ({ ...p, s: shape(p.w, p.h, p.k) })) }));
   select(sel && chars.find(c => c.id === sel.id));
 }
+/* une personne par IP : nom de son premier carnavalier, posés / autorisés (1 + ceux accordés ici) */
+async function loadPeople() {
+  const ul = document.getElementById('people');
+  const rows = await call('/api/admin/personnes');
+  ul.replaceChildren();
+  if (!rows.length) { const li = document.createElement('li'); li.textContent = 'Aucune'; ul.append(li); }
+  for (const p of rows) {
+    const li = document.createElement('li'), t = document.createElement('span'), btns = document.createElement('div');
+    t.textContent = (p.name || 'Sans nom') + '\n' + p.ip + ' · ' + p.posted + ' / ' + (1 + p.extra);
+    /* clic sur la personne : son dernier carnavalier est sélectionné sur l'affiche */
+    t.onclick = () => select(chars.find(c => c.id === p.last));
+    btns.className = 'row';
+    for (const [txt, d] of [['−1', -1], ['+1', 1]]) {
+      const b = document.createElement('button');
+      b.className = 'b t2'; b.textContent = txt; b.disabled = p.extra + d < 0;
+      b.onclick = () => call('/api/admin/personnes/' + encodeURIComponent(p.ip), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ extra: p.extra + d }) })
+        .then(loadPeople, loadPeople);
+      btns.append(b);
+    }
+    li.append(t, btns); ul.append(li);
+  }
+}
 async function loadBans() {
   const ul = document.getElementById('bans');
   ul.replaceChildren();
@@ -137,9 +159,9 @@ function ask(msg, yes, fn) {
 }
 const label = c => c.name ? '« ' + c.name + ' »' : 'ce carnavalier';
 document.getElementById('del').onclick = () => { const c = sel; ask('Supprimer ' + label(c) + ' ?', 'Supprimer',
-  () => call('/api/admin/pantins/' + c.id, { method: 'DELETE' }).finally(load)); };
+  () => call('/api/admin/pantins/' + c.id, { method: 'DELETE' }).finally(() => { load(); loadPeople(); })); };
 document.getElementById('ban').onclick = () => { const c = sel; ask('Supprimer ' + label(c) + ' et bannir l’IP ' + c.ip + ' ? Elle ne pourra plus poser de carnavalier.', 'Bannir',
-  () => call('/api/admin/pantins/' + c.id + '/ban', { method: 'POST' }).finally(() => { load(); loadBans(); })); };
+  () => call('/api/admin/pantins/' + c.id + '/ban', { method: 'POST' }).finally(() => { load(); loadPeople(); loadBans(); })); };
 document.getElementById('yes').onclick = () => { pop.hidden = true; onYes().catch(() => {}); };
 document.getElementById('no').onclick = () => { pop.hidden = true; };
 window.addEventListener('keydown', e => {
@@ -194,6 +216,6 @@ document.getElementById('jpg').onclick = exportJPG;
 document.getElementById('pdf').onclick = exportPDF;
 
 /* ---------- init : les nouveaux carnavaliers arrivent tout seuls ---------- */
-load().catch(() => {}); loadBans().catch(() => {});
-setInterval(() => { if (pop.hidden) load().catch(() => {}); }, 15000);
+load().catch(() => {}); loadPeople().catch(() => {}); loadBans().catch(() => {});
+setInterval(() => { if (pop.hidden) { load().catch(() => {}); loadPeople().catch(() => {}); } }, 15000);
 })();

@@ -21,7 +21,8 @@ html,body{margin:0;height:100%;background:#fff;color:#000;overflow:hidden}
 #home{position:fixed;inset:0;display:grid;grid-template-columns:1fr calc((100dvh - 32px) * 9 / 16) 1fr;gap:16px;padding:16px;box-sizing:border-box}
 #side{display:flex;align-items:center;justify-content:center}
 #join{padding:24px 32px;text-transform:uppercase;white-space:nowrap}
-#home.busy #join{visibility:hidden}
+#home.busy #join,#home.busy #done{visibility:hidden}
+#done{margin:0}
 #pane{position:relative;min-width:0;min-height:0}
 #cv{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none}
 #tip{position:fixed;pointer-events:none;background:#000;color:#fff;padding:4px 8px;transform:translate(12px,12px);white-space:nowrap}
@@ -72,6 +73,7 @@ html,body{margin:0;height:100%;background:#fff;color:#000;overflow:hidden}
 <main id="home">
   <div id="side">
     <button id="join" class="b t1">Créer ton personnage</button>
+    <p id="done" class="t1" hidden>Ton carnavalier est sur l’affiche.</p>
   </div>
   <div id="pane"><canvas id="cv"></canvas></div>
   <div></div>

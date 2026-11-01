@@ -66,6 +66,8 @@ const cols = (await stmt('PRAGMA table_info(pantins)').all()).map(c => c.name);
 if (!cols.includes('ip')) await stmt("ALTER TABLE pantins ADD COLUMN ip TEXT NOT NULL DEFAULT 'inconnu'").run();
 if (!cols.includes('mode')) await stmt("ALTER TABLE pantins ADD COLUMN mode TEXT NOT NULL DEFAULT 'inconnu'").run();
 await stmt('CREATE TABLE IF NOT EXISTS bans (ip TEXT PRIMARY KEY, created_at TEXT NOT NULL)').run();
+/* un carnavalier par IP ; n = carnavaliers en plus accordés depuis le panel */
+await stmt('CREATE TABLE IF NOT EXISTS extras (ip TEXT PRIMARY KEY, n INTEGER NOT NULL)').run();
 /* requêtes préparées uniquement : les valeurs ne sont jamais concaténées dans le SQL */
 const qAll = stmt('SELECT id, name, parts FROM pantins WHERE id > ? ORDER BY id'); /* public : jamais l'ip */
 const qAdd = stmt('INSERT INTO pantins (name, parts, created_at, ip, mode) VALUES (?, ?, ?, ?, ?)');
@@ -76,6 +78,11 @@ const qBanned = stmt('SELECT 1 AS x FROM bans WHERE ip = ?');
 const qBan = stmt('INSERT OR IGNORE INTO bans (ip, created_at) VALUES (?, ?)');
 const qBans = stmt('SELECT ip, created_at FROM bans ORDER BY created_at DESC');
 const qUnban = stmt('DELETE FROM bans WHERE ip = ?');
+const qPosted = stmt('SELECT COUNT(*) AS n FROM pantins WHERE ip = ?');
+const qExtra = stmt('SELECT n FROM extras WHERE ip = ?');
+const qExtras = stmt('SELECT ip, n FROM extras');
+const qSetExtra = stmt('INSERT INTO extras (ip, n) VALUES (?, ?) ON CONFLICT(ip) DO UPDATE SET n = excluded.n');
+const qDelExtra = stmt('DELETE FROM extras WHERE ip = ?');
 
 /* ---------- validation (mêmes règles que le client, qui n'est jamais cru sur parole) ---------- */
 const W = 720, H = 1280; /* taille logique de l'affiche, identique à public/app.js et admin/admin.js */
@@ -139,6 +146,14 @@ const readBody = (req, max) => new Promise(ok => {
   req.on('end', () => ok(raw));
 });
 const last = new Map(); /* ip -> date du dernier ajout : un pantin toutes les 5 s par adresse */
+const pending = new Set(); /* ip dont un ajout est en cours : deux envois simultanés ne dépassent pas la limite */
+/* carnavaliers que cette IP peut encore poser : 1 + ceux accordés dans le panel, moins ceux déjà posés.
+   IP bannie ou inconnue : 0 */
+async function left(ip) {
+  if (ip === 'inconnu' || await qBanned.get(ip)) return 0;
+  const extra = await qExtra.get(ip), posted = await qPosted.get(ip);
+  return Math.max(0, 1 + (extra ? extra.n : 0) - posted.n);
+}
 
 async function api(req, res, url) {
   if (req.method === 'GET') {
@@ -158,9 +173,14 @@ async function api(req, res, url) {
   const name = cleanName(body && body.name), parts = cleanParts(body && body.parts);
   const mode = body && MODES.includes(body.mode) ? body.mode : null;
   if (name === null || !parts || !mode) return send(res, 400, { error: 'invalide' });
-  last.set(ip, now);
-  const { lastInsertRowid } = await qAdd.run(name, JSON.stringify(parts), new Date().toISOString(), ip, mode);
-  send(res, 201, { id: Number(lastInsertRowid) });
+  if (pending.has(ip)) return send(res, 429, { error: 'trop vite' });
+  pending.add(ip);
+  try {
+    if (!await left(ip)) return send(res, 403, { error: 'refusé' });
+    last.set(ip, now);
+    const { lastInsertRowid } = await qAdd.run(name, JSON.stringify(parts), new Date().toISOString(), ip, mode);
+    send(res, 201, { id: Number(lastInsertRowid) });
+  } finally { pending.delete(ip); }
 }
 
 function serveFile(req, res, dir, rel, extra = {}) {
@@ -270,6 +290,31 @@ async function adminApi(req, res, url) {
     return send(res, 200, { ok: true });
   }
   if (m === 'GET' && p === '/bans') return send(res, 200, (await qBans.all()).map(r => ({ ip: r.ip, created_at: r.created_at })), undefined, ADMIN_HEADERS);
+  /* une personne = une IP ; son nom est celui de son premier carnavalier */
+  if (m === 'GET' && p === '/personnes') {
+    const people = new Map(), get = ip => people.get(ip) || people.set(ip, { ip, name: '', posted: 0, extra: 0, last: 0 }).get(ip);
+    for (const r of await qAdmAll.all()) {
+      if (r.ip === 'inconnu') continue;
+      const o = get(r.ip);
+      if (!o.posted) o.name = r.name;
+      o.posted++; o.last = r.id;
+    }
+    for (const r of await qExtras.all()) get(r.ip).extra = r.n;
+    return send(res, 200, [...people.values()].sort((a, b) => b.last - a.last), undefined, ADMIN_HEADERS);
+  }
+  /* carnavaliers en plus pour une IP : { extra: n } */
+  if (m === 'PUT' && (r = /^\/personnes\/([^/]{1,64})$/.exec(p))) {
+    let ip;
+    try { ip = decodeURIComponent(r[1]); } catch { return send(res, 400, { error: 'ip' }); }
+    if (!net.isIP(ip)) return send(res, 400, { error: 'ip' });
+    const raw = await readBody(req, 256);
+    if (raw === null) return;
+    let n;
+    try { n = JSON.parse(raw).extra; } catch { return send(res, 400, { error: 'json' }); }
+    if (!Number.isInteger(n) || n < 0 || n > 999) return send(res, 400, { error: 'invalide' });
+    await (n ? qSetExtra.run(ip, n) : qDelExtra.run(ip));
+    return send(res, 200, { ok: true });
+  }
   if (m === 'DELETE' && (r = /^\/bans\/([^/]{1,64})$/.exec(p))) {
     let ip;
     try { ip = decodeURIComponent(r[1]); } catch { return send(res, 400, { error: 'ip' }); }
@@ -285,6 +330,8 @@ const fail = res => e => { console.error(e); if (!res.headersSent) send(res, 500
 http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
   if (url.pathname === '/api/pantins') return api(req, res, url).catch(fail(res));
+  /* combien de carnavaliers ce visiteur peut encore poser (rien d'autre n'est renvoyé) */
+  if (url.pathname === '/api/reste') return left(clientIp(req)).then(n => send(res, 200, { reste: n })).catch(fail(res));
   if (url.pathname === '/api/admin' || url.pathname.startsWith('/api/admin/')) return adminApi(req, res, url).catch(fail(res));
   if (ADMIN && (url.pathname === ADMIN_PATH || url.pathname.startsWith(ADMIN_PATH + '/'))) return adminPage(req, res, url);
   serveFile(req, res, PUB, url.pathname);
