@@ -1,0 +1,254 @@
+/* Serveur de l'affiche : fichiers statiques de public/ + API des pantins sauvegardés (SQLite)
+   + panel admin caché (admin/). Aucune dépendance : node:http et node:sqlite (Node 22.5+). */
+import http from 'node:http';
+import fs from 'node:fs';
+import net from 'node:net';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
+const PUB = path.join(ROOT, 'public'), ADM = path.join(ROOT, 'admin');
+const PORT = +process.env.PORT || 3000;
+const PROD = process.env.NODE_ENV === 'production';
+/* nombre de proxys de confiance devant le serveur : 0 = X-Forwarded-For ignoré (falsifiable) */
+const TRUST_PROXY = Math.max(0, parseInt(process.env.TRUST_PROXY, 10) || 0);
+
+/* ---------- panel admin : chemin et mot de passe uniquement par variables d'environnement ---------- */
+const ADMIN_PATH = process.env.ADMIN_PATH || '', ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
+const ADMIN = /^\/[\w-]+$/.test(ADMIN_PATH) && !/^\/api(?:$|[\W_])/i.test(ADMIN_PATH) && ADMIN_PASSWORD !== '';
+if ((ADMIN_PATH || ADMIN_PASSWORD) && !ADMIN) console.warn('Panel admin désactivé : ADMIN_PATH (ex. /mon-chemin-secret) et ADMIN_PASSWORD sont requis.');
+
+/* ---------- base ---------- */
+fs.mkdirSync(path.join(ROOT, 'data'), { recursive: true });
+const db = new DatabaseSync(path.join(ROOT, 'data', 'pantins.db'));
+db.exec(`CREATE TABLE IF NOT EXISTS pantins (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  parts TEXT NOT NULL,
+  created_at TEXT NOT NULL
+)`);
+/* migration : ip et mode ajoutés sans toucher aux pantins existants, qui restent « inconnu » */
+const cols = db.prepare('PRAGMA table_info(pantins)').all().map(c => c.name);
+if (!cols.includes('ip')) db.exec("ALTER TABLE pantins ADD COLUMN ip TEXT NOT NULL DEFAULT 'inconnu'");
+if (!cols.includes('mode')) db.exec("ALTER TABLE pantins ADD COLUMN mode TEXT NOT NULL DEFAULT 'inconnu'");
+db.exec('CREATE TABLE IF NOT EXISTS bans (ip TEXT PRIMARY KEY, created_at TEXT NOT NULL)');
+/* requêtes préparées uniquement : les valeurs ne sont jamais concaténées dans le SQL */
+const qAll = db.prepare('SELECT id, name, parts FROM pantins WHERE id > ? ORDER BY id'); /* public : jamais l'ip */
+const qAdd = db.prepare('INSERT INTO pantins (name, parts, created_at, ip, mode) VALUES (?, ?, ?, ?, ?)');
+const qAdmAll = db.prepare('SELECT id, name, parts, created_at, ip, mode FROM pantins ORDER BY id');
+const qIp = db.prepare('SELECT ip FROM pantins WHERE id = ?');
+const qDel = db.prepare('DELETE FROM pantins WHERE id = ?');
+const qBanned = db.prepare('SELECT 1 FROM bans WHERE ip = ?');
+const qBan = db.prepare('INSERT OR IGNORE INTO bans (ip, created_at) VALUES (?, ?)');
+const qBans = db.prepare('SELECT ip, created_at FROM bans ORDER BY created_at DESC');
+const qUnban = db.prepare('DELETE FROM bans WHERE ip = ?');
+
+/* ---------- validation (mêmes règles que le client, qui n'est jamais cru sur parole) ---------- */
+const W = 720, H = 1280; /* taille logique de l'affiche, identique à public/app.js et admin/admin.js */
+const KINDS = ['square', 'rect', 'tri', 'circle', 'ellipse'];
+const MODES = ['aleatoire', 'editeur'];
+const NAME_RE = /^[\p{L}\p{N}]+(?:[ -][\p{L}\p{N}]+)*$/u; /* lettres, chiffres, espaces et tirets simples */
+function cleanName(v) {
+  if (typeof v !== 'string') return null;
+  const s = v.normalize('NFC').trim();
+  if (s === '') return '';
+  if (s.length > 40 || !NAME_RE.test(s)) return null;
+  if (s.split(/[ -]/).some(w => w.length > 25)) return null;
+  return s;
+}
+const num = (v, lo, hi) => typeof v === 'number' && Number.isFinite(v) && v >= lo && v <= hi;
+function cleanParts(v) {
+  if (!Array.isArray(v) || v.length !== 6) return null;
+  const out = [];
+  for (const p of v) {
+    if (!p || typeof p !== 'object') return null;
+    if (!KINDS.includes(p.k) || typeof p.c !== 'string' || !/^#[0-9a-f]{6}$/i.test(p.c)) return null;
+    if (!num(p.w, 2, 200) || !num(p.h, 2, 200) || !num(p.x, -300, W + 300) || !num(p.y, -3000, H + 100) || !num(p.a, -1e4, 1e4)) return null;
+    /* on ne garde que les champs connus, arrondis : rien d'autre n'est stocké */
+    const r = n => Math.round(n * 100) / 100;
+    out.push({ k: p.k, c: p.c.toLowerCase(), w: r(p.w), h: r(p.h), x: r(p.x), y: r(p.y), a: Math.round(p.a * 1e4) / 1e4 });
+  }
+  return out;
+}
+/* adresse du visiteur : la connexion elle-même, ou X-Forwarded-For seulement si TRUST_PROXY le permet.
+   Chaque proxy ajoute l'adresse qu'il voit à la fin : on prend celle ajoutée par le plus lointain des proxys de confiance */
+function clientIp(req) {
+  let ip = req.socket.remoteAddress || '';
+  if (TRUST_PROXY) {
+    const xff = String(req.headers['x-forwarded-for'] || '').split(',').map(s => s.trim()).filter(Boolean);
+    if (xff.length >= TRUST_PROXY) ip = xff[xff.length - TRUST_PROXY];
+  }
+  ip = ip.replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/, '');
+  return net.isIP(ip) ? ip : 'inconnu';
+}
+
+/* ---------- http ---------- */
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' };
+const HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+  'Content-Security-Policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+};
+function send(res, code, body, type = 'application/json; charset=utf-8', extra = {}) {
+  res.writeHead(code, { ...HEADERS, 'Content-Type': type, 'Cache-Control': 'no-store', ...extra });
+  res.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body));
+}
+/* réponse identique à un fichier absent : une route admin sans session n'existe pas */
+const notFound = res => send(res, 404, 'introuvable', 'text/plain');
+function readBody(req, res, max, cb) {
+  let raw = '', big = false;
+  req.setEncoding('utf8');
+  req.on('data', d => { raw += d; if (raw.length > max) { big = true; req.destroy(); } });
+  req.on('end', () => { if (!big) cb(raw); });
+}
+const last = new Map(); /* ip -> date du dernier ajout : un pantin toutes les 5 s par adresse */
+
+function api(req, res, url) {
+  if (req.method === 'GET') {
+    const after = Math.max(0, parseInt(url.searchParams.get('after'), 10) || 0);
+    return send(res, 200, qAll.all(after).map(r => ({ id: r.id, name: r.name, parts: JSON.parse(r.parts) })));
+  }
+  if (req.method !== 'POST') return send(res, 405, { error: 'méthode' });
+  if (!/^application\/json/.test(req.headers['content-type'] || '')) return send(res, 415, { error: 'format' });
+  const ip = clientIp(req), now = Date.now();
+  /* IP bannie : un refus comme un autre, sans dire pourquoi */
+  if (qBanned.get(ip)) return send(res, 403, { error: 'refusé' });
+  if (now - (last.get(ip) || 0) < 5000) return send(res, 429, { error: 'trop vite' });
+  readBody(req, res, 8192, raw => {
+    let body;
+    try { body = JSON.parse(raw); } catch { return send(res, 400, { error: 'json' }); }
+    const name = cleanName(body && body.name), parts = cleanParts(body && body.parts);
+    const mode = body && MODES.includes(body.mode) ? body.mode : null;
+    if (name === null || !parts || !mode) return send(res, 400, { error: 'invalide' });
+    last.set(ip, now);
+    const { lastInsertRowid } = qAdd.run(name, JSON.stringify(parts), new Date().toISOString(), ip, mode);
+    send(res, 201, { id: Number(lastInsertRowid) });
+  });
+}
+
+function serveFile(req, res, dir, rel, extra = {}) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'méthode', 'text/plain');
+  let p;
+  try { p = decodeURIComponent(rel); } catch { return send(res, 400, 'url', 'text/plain'); }
+  const file = path.join(dir, path.normalize(p === '/' ? '/index.html' : p));
+  if (!file.startsWith(dir + path.sep)) return send(res, 403, 'interdit', 'text/plain'); /* pas de ../ */
+  fs.readFile(file, (err, buf) => {
+    if (err) return notFound(res);
+    res.writeHead(200, { ...HEADERS, 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', ...extra });
+    res.end(req.method === 'HEAD' ? undefined : buf);
+  });
+}
+
+/* ---------- admin : session et connexion ---------- */
+const SESSION_MS = 4 * 3600e3, MAX_TRIES = 5, LOCK_MS = 15 * 60e3;
+const sessions = new Map(); /* jeton -> expiration */
+const tries = new Map();    /* ip -> { n: essais ratés, until: fin du blocage } */
+function hasSession(req) {
+  const m = /(?:^|;\s*)adm=([\w-]{43})(?:;|$)/.exec(req.headers.cookie || '');
+  const exp = m && sessions.get(m[1]);
+  if (!exp) return false;
+  if (exp > Date.now()) return true;
+  sessions.delete(m[1]);
+  return false;
+}
+/* empreintes de même longueur : la comparaison prend le même temps quel que soit le mot de passe essayé */
+const sha = s => crypto.createHash('sha256').update(s).digest();
+const PW = sha(ADMIN_PASSWORD);
+const goodPassword = p => crypto.timingSafeEqual(sha(p), PW);
+const ADMIN_HEADERS = { 'X-Robots-Tag': 'noindex, nofollow', 'Cache-Control': 'no-store' };
+/* page de connexion : aucun contenu venant de la requête n'y est inséré */
+const loginPage = msg => `<!DOCTYPE html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow"><title>Admin</title>
+<style>
+.t2{font:700 16px/1 Helvetica,"Helvetica Neue",Arial,sans-serif;text-transform:uppercase}
+.t3{font:400 16px/1.3 Helvetica,"Helvetica Neue",Arial,sans-serif}
+html,body{margin:0;height:100%;background:#000;color:#fff}
+form{height:100%;display:flex;flex-direction:column;gap:16px;align-items:stretch;justify-content:center;width:320px;margin:0 auto;padding:16px;box-sizing:border-box}
+input,button{border:1px solid #fff;border-radius:0;margin:0;padding:20px;background:#000;color:#fff;outline:none}
+button{cursor:pointer}
+button:hover{background:#fff;color:#000}
+p{margin:0}
+</style></head><body>
+<form method="post" autocomplete="off">
+<input class="t3" type="password" name="password" required autofocus aria-label="Mot de passe" placeholder="Mot de passe">
+<button class="t2">Entrer</button>
+${msg ? `<p class="t3">${msg}</p>` : ''}
+</form></body></html>`;
+
+function login(req, res) {
+  const ip = clientIp(req), now = Date.now(), t = tries.get(ip) || { n: 0, until: 0 };
+  const page = (code, msg) => send(res, code, loginPage(msg), MIME['.html'], ADMIN_HEADERS);
+  if (t.until > now) return page(429, 'Trop d’essais. Réessaie dans ' + Math.ceil((t.until - now) / 60e3) + ' min.');
+  readBody(req, res, 1024, raw => {
+    const pw = new URLSearchParams(raw).get('password') || '';
+    if (!goodPassword(pw)) {
+      t.n++;
+      if (t.n >= MAX_TRIES) { t.n = 0; t.until = now + LOCK_MS; }
+      tries.set(ip, t);
+      return t.until > now ? page(429, 'Trop d’essais. Réessaie dans ' + LOCK_MS / 60e3 + ' min.') : page(401, 'Mot de passe incorrect.');
+    }
+    tries.delete(ip);
+    for (const [k, exp] of sessions) if (exp <= now) sessions.delete(k);
+    const tok = crypto.randomBytes(32).toString('base64url');
+    sessions.set(tok, now + SESSION_MS);
+    res.writeHead(303, { ...HEADERS, ...ADMIN_HEADERS, Location: ADMIN_PATH + '/',
+      'Set-Cookie': `adm=${tok}; Path=/; Max-Age=${SESSION_MS / 1000}; HttpOnly; SameSite=Strict${PROD ? '; Secure' : ''}` });
+    res.end();
+  });
+}
+
+/* ADMIN_PATH/ : connexion sans session, panel avec. Les fichiers du panel n'existent que pour une session */
+function adminPage(req, res, url) {
+  if (url.pathname === ADMIN_PATH) return send(res, 301, '', 'text/plain', { Location: ADMIN_PATH + '/' });
+  const rel = url.pathname.slice(ADMIN_PATH.length), ok = hasSession(req);
+  if (rel === '/') {
+    if (req.method === 'POST') return login(req, res);
+    if (!ok) return send(res, 200, loginPage(''), MIME['.html'], ADMIN_HEADERS);
+  }
+  if (!ok) return notFound(res);
+  serveFile(req, res, ADM, rel, ADMIN_HEADERS);
+}
+
+function adminApi(req, res, url) {
+  if (!ADMIN || !hasSession(req)) return notFound(res);
+  /* en plus de SameSite=Strict : une action venue d'un autre site est refusée */
+  const o = req.headers.origin;
+  if (req.method !== 'GET' && o) { let h; try { h = new URL(o).host; } catch {} if (h !== req.headers.host) return send(res, 403, { error: 'origine' }); }
+  const p = url.pathname.slice('/api/admin'.length), m = req.method;
+  let r;
+  if (m === 'GET' && p === '/pantins')
+    return send(res, 200, qAdmAll.all().map(r => ({ id: r.id, name: r.name, parts: JSON.parse(r.parts), created_at: r.created_at, ip: r.ip, mode: r.mode })), undefined, ADMIN_HEADERS);
+  if (m === 'DELETE' && (r = /^\/pantins\/(\d{1,15})$/.exec(p))) {
+    const { changes } = qDel.run(+r[1]);
+    return send(res, changes ? 200 : 404, { ok: !!changes });
+  }
+  /* l'IP à bannir est lue en base, jamais fournie par le client */
+  if (m === 'POST' && (r = /^\/pantins\/(\d{1,15})\/ban$/.exec(p))) {
+    const row = qIp.get(+r[1]);
+    if (!row) return send(res, 404, { ok: false });
+    if (row.ip === 'inconnu') return send(res, 400, { error: 'ip inconnue' });
+    qBan.run(row.ip, new Date().toISOString());
+    qDel.run(+r[1]);
+    return send(res, 200, { ok: true });
+  }
+  if (m === 'GET' && p === '/bans') return send(res, 200, qBans.all().map(r => ({ ip: r.ip, created_at: r.created_at })), undefined, ADMIN_HEADERS);
+  if (m === 'DELETE' && (r = /^\/bans\/([^/]{1,64})$/.exec(p))) {
+    let ip;
+    try { ip = decodeURIComponent(r[1]); } catch { return send(res, 400, { error: 'ip' }); }
+    if (!net.isIP(ip)) return send(res, 400, { error: 'ip' });
+    qUnban.run(ip);
+    return send(res, 200, { ok: true });
+  }
+  notFound(res);
+}
+
+http.createServer((req, res) => {
+  const url = new URL(req.url, 'http://localhost');
+  if (url.pathname === '/api/pantins') return api(req, res, url);
+  if (url.pathname === '/api/admin' || url.pathname.startsWith('/api/admin/')) return adminApi(req, res, url);
+  if (ADMIN && (url.pathname === ADMIN_PATH || url.pathname.startsWith(ADMIN_PATH + '/'))) return adminPage(req, res, url);
+  serveFile(req, res, PUB, url.pathname);
+}).listen(PORT, () => console.log(`Affiche : http://localhost:${PORT}` + (ADMIN ? ` (panel admin actif)` : '')));
