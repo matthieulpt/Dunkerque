@@ -80,6 +80,8 @@ const qUnban = stmt('DELETE FROM bans WHERE ip = ?');
 /* ---------- validation (mêmes règles que le client, qui n'est jamais cru sur parole) ---------- */
 const W = 720, H = 1280; /* taille logique de l'affiche, identique à public/app.js et admin/admin.js */
 const KINDS = ['square', 'rect', 'tri', 'circle', 'ellipse'];
+/* les seules couleurs acceptées ; même liste dans public/app.js */
+const PALETTE = ['#04e762', '#f5b700', '#dc0073', '#008bf8', '#89fc00'];
 const MODES = ['aleatoire', 'editeur'];
 const NAME_RE = /^[\p{L}\p{N}]+(?:[ -][\p{L}\p{N}]+)*$/u; /* lettres, chiffres, espaces et tirets simples */
 function cleanName(v) {
@@ -96,7 +98,7 @@ function cleanParts(v) {
   const out = [];
   for (const p of v) {
     if (!p || typeof p !== 'object') return null;
-    if (!KINDS.includes(p.k) || typeof p.c !== 'string' || !/^#[0-9a-f]{6}$/i.test(p.c)) return null;
+    if (!KINDS.includes(p.k) || typeof p.c !== 'string' || !PALETTE.includes(p.c.toLowerCase())) return null;
     if (!num(p.w, 2, 200) || !num(p.h, 2, 200) || !num(p.x, -300, W + 300) || !num(p.y, -3000, H + 100) || !num(p.a, -1e4, 1e4)) return null;
     /* on ne garde que les champs connus, arrondis : rien d'autre n'est stocké */
     const r = n => Math.round(n * 100) / 100;

@@ -15,7 +15,8 @@ const V = (x, y) => pl.Vec2(x / S, y / S);
 /* ---------- utilitaires ---------- */
 const rng = a => () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
 const R = (r, a, b) => a + (b - a) * r();
-const hsv = (h, s, v) => { const f = n => { const k = (n + h / 60) % 6; return v - v * s * Math.max(0, Math.min(k, 4 - k, 1)); }; return '#' + [5, 3, 1].map(n => Math.round(f(n) * 255).toString(16).padStart(2, '0')).join(''); };
+/* les seules couleurs des carnavaliers (éditeur et aléatoire) ; même liste dans server.js */
+const PALETTE = ['#04e762', '#f5b700', '#dc0073', '#008bf8', '#89fc00'];
 const fx = n => Math.round(n * 100) / 100;
 
 /* ---------- monde ---------- */
@@ -94,8 +95,8 @@ function spawn(spec) {
 }
 function design(seed, spec) {
   const r = rng(seed);
-  /* une couleur aléatoire par morceau */
-  const colors = spec ? spec.map(p => p.c) : PARTS.map(() => hsv(r() * 360, 0.75 + r() * 0.25, 0.9 + r() * 0.1));
+  /* une couleur de la palette par morceau */
+  const colors = spec ? spec.map(p => p.c) : PARTS.map(() => PALETTE[Math.floor(r() * PALETTE.length)]);
   const mk = i => {
     if (spec) { const n = nominal(i, spec[i].k); return shape(r, n.w * U, n.h * U, spec[i].k); }
     const [w0, w1, h0, h1] = SIZES[PARTS[i]];
@@ -332,13 +333,11 @@ function shapeTag(sh, fill) {
   if (sh.k === 'ellipse') return `<ellipse rx="${fx(sh.w / 2)}" ry="${fx(sh.h / 2)}" fill="${fill}"/>`;
   return `<polygon points="${sh.pts.map(p => fx(p[0]) + ',' + fx(p[1])).join(' ')}" fill="${fill}"/>`;
 }
-const PALETTE = ['#e63946', '#ff7f11', '#ffd400', '#8ac926', '#06a77d', '#00b4d8',
-                 '#1982c4', '#3a0ca3', '#9b5de5', '#f15bb5', '#8d5524', '#000000'];
 /* personnage de base : torse rectangle, tête ronde, bras et jambes ovales */
 const ed = [
-  { k: 'rect', c: '#1982c4' }, { k: 'circle', c: '#ffd400' },
-  { k: 'ellipse', c: '#e63946' }, { k: 'ellipse', c: '#000000' },
-  { k: 'ellipse', c: '#e63946' }, { k: 'ellipse', c: '#000000' }
+  { k: 'rect', c: '#008bf8' }, { k: 'circle', c: '#f5b700' },
+  { k: 'ellipse', c: '#dc0073' }, { k: 'ellipse', c: '#04e762' },
+  { k: 'ellipse', c: '#dc0073' }, { k: 'ellipse', c: '#04e762' }
 ];
 const pv = document.getElementById('pv');
 /* aperçu à plat : morceaux juxtaposés (petit écart) pour qu'on vise facilement chacun d'eux */

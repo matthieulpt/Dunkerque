@@ -28,11 +28,10 @@ html,body{margin:0;height:100%;background:#fff;color:#000;overflow:hidden}
 
 /* éditeur : formes à gauche, pantin au milieu, couleurs à droite */
 /* formes et couleurs : deux blocs de même taille, chacun centré dans l'espace entre le bord et le pantin.
-   5 formes sur une colonne, 12 couleurs sur deux : les formes sont donc plus grosses */
+   5 formes et 5 couleurs, chacune sur une colonne */
 #ed{position:fixed;inset:0;background:#fff;display:grid;grid-template-columns:1fr auto 1fr;gap:16px;padding:16px;box-sizing:border-box}
 #shapes,#pal{display:grid;gap:8px;align-self:center;justify-self:center;width:152px;height:min(472px,calc(100dvh - 32px))}
-#shapes{grid-template-rows:repeat(5,minmax(0,1fr))}
-#pal{grid-template-columns:1fr 1fr;grid-template-rows:repeat(6,minmax(0,1fr))}
+#shapes,#pal{grid-template-rows:repeat(5,minmax(0,1fr))}
 #mid{display:flex;flex-direction:column;gap:16px;min-height:0;min-width:0}
 #pv{flex:1;min-height:0;width:100%;display:block;overflow:visible}
 #pv [data-p]{cursor:copy}
@@ -61,8 +60,9 @@ html,body{margin:0;height:100%;background:#fff;color:#000;overflow:hidden}
   #mid{display:contents}
   #pv{order:1;height:100%}
   #shapes,#pal{width:100%;height:auto;justify-self:stretch}
-  #shapes{order:2;grid-template-columns:repeat(5,1fr);grid-template-rows:48px}
-  #pal{order:3;grid-template-columns:repeat(6,1fr);grid-template-rows:40px 40px}
+  #shapes,#pal{grid-template-columns:repeat(5,1fr);grid-template-rows:48px}
+  #shapes{order:2}
+  #pal{order:3}
   #name{order:4}
   #mid .row{order:5}
 }
