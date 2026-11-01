@@ -14,6 +14,9 @@ const PORT = +process.env.PORT || 3000;
 const PROD = process.env.NODE_ENV === 'production';
 /* nombre de proxys de confiance devant le serveur : 0 = X-Forwarded-For ignoré (falsifiable) */
 const TRUST_PROXY = Math.max(0, parseInt(process.env.TRUST_PROXY, 10) || 0);
+/* en-tête posé par le proxy de l'hébergeur avec l'adresse réelle (Render : true-client-ip, mis par Cloudflare).
+   Prioritaire sur X-Forwarded-For : chez Render, la dernière adresse de X-Forwarded-For est un proxy commun à tous */
+const IP_HEADER = (process.env.IP_HEADER || '').toLowerCase();
 
 /* ---------- panel admin : chemin et mot de passe uniquement par variables d'environnement ---------- */
 const ADMIN_PATH = process.env.ADMIN_PATH || '', ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
@@ -117,7 +120,9 @@ function cleanParts(v) {
    Chaque proxy ajoute l'adresse qu'il voit à la fin : on prend celle ajoutée par le plus lointain des proxys de confiance */
 function clientIp(req) {
   let ip = req.socket.remoteAddress || '';
-  if (TRUST_PROXY) {
+  const h = IP_HEADER && String(req.headers[IP_HEADER] || '').trim();
+  if (h) ip = h;
+  else if (TRUST_PROXY) {
     const xff = String(req.headers['x-forwarded-for'] || '').split(',').map(s => s.trim()).filter(Boolean);
     if (xff.length >= TRUST_PROXY) ip = xff[xff.length - TRUST_PROXY];
   }

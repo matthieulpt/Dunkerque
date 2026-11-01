@@ -15,6 +15,9 @@ services:
         value: production
       - key: TRUST_PROXY
         value: "1"
+      # adresse réelle du visiteur : sans elle, tout le monde a l'IP d'un proxy de Render
+      - key: IP_HEADER
+        value: true-client-ip
       - key: ADMIN_PATH
         sync: false
       - key: ADMIN_PASSWORD
