@@ -1,5 +1,5 @@
-/* Serveur de l'affiche : fichiers statiques de public/ + API des pantins sauvegardés (SQLite)
-   + panel admin caché (admin/). Aucune dépendance : node:http et node:sqlite (Node 22.5+). */
+/* Serveur de l'affiche : fichiers statiques de public/ + API des pantins sauvegardés (SQLite local ou Turso)
+   + panel admin caché (admin/). Aucune dépendance : node:http, node:sqlite et fetch (Node 22.13+). */
 import http from 'node:http';
 import fs from 'node:fs';
 import net from 'node:net';
@@ -21,31 +21,61 @@ const ADMIN = /^\/[\w-]+$/.test(ADMIN_PATH) && !/^\/api(?:$|[\W_])/i.test(ADMIN_
 if ((ADMIN_PATH || ADMIN_PASSWORD) && !ADMIN) console.warn('Panel admin désactivé : ADMIN_PATH (ex. /mon-chemin-secret) et ADMIN_PASSWORD sont requis.');
 
 /* ---------- base ---------- */
-/* dossier de la base : DATA_DIR, sinon le disque Railway s'il y en a un, sinon data/ */
-const DATA = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(ROOT, 'data');
-fs.mkdirSync(DATA, { recursive: true });
-const db = new DatabaseSync(path.join(DATA, 'pantins.db'));
-db.exec(`CREATE TABLE IF NOT EXISTS pantins (
+/* en ligne : base Turso (SQLite hébergé), interrogée par son API HTTP, sans dépendance.
+   Sinon : fichier SQLite local dans DATA_DIR, le disque Railway s'il y en a un, ou data/.
+   Les deux exposent la même interface asynchrone : stmt(sql).all / get / run avec des paramètres ? */
+const TURSO_URL = (process.env.TURSO_DATABASE_URL || '').replace(/^libsql:\/\//, 'https://').replace(/\/+$/, '');
+const TURSO_TOKEN = process.env.TURSO_AUTH_TOKEN || '';
+if (TURSO_URL && !/^(https:\/\/[\w.-]+|http:\/\/(localhost|127\.0\.0\.1):\d+)$/.test(TURSO_URL)) /* http : seulement `turso dev` en local */ throw new Error('TURSO_DATABASE_URL invalide');
+let stmt;
+if (TURSO_URL) {
+  const arg = v => typeof v === 'number' ? (Number.isInteger(v) ? { type: 'integer', value: String(v) } : { type: 'float', value: v })
+    : v == null ? { type: 'null' } : { type: 'text', value: String(v) };
+  const val = v => v.type === 'integer' ? Number(v.value) : v.type === 'null' ? null : v.value;
+  stmt = sql => {
+    const exec = async args => {
+      const r = await fetch(TURSO_URL + '/v2/pipeline', {
+        method: 'POST', headers: { Authorization: 'Bearer ' + TURSO_TOKEN, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requests: [{ type: 'execute', stmt: { sql, args: args.map(arg) } }, { type: 'close' }] })
+      });
+      if (!r.ok) throw new Error('Turso : HTTP ' + r.status);
+      const out = (await r.json()).results[0];
+      if (out.type !== 'ok') throw new Error('Turso : ' + (out.error && out.error.message));
+      const { cols, rows, affected_row_count, last_insert_rowid } = out.response.result;
+      return { rows: rows.map(row => Object.fromEntries(row.map((v, i) => [cols[i].name, val(v)]))), changes: affected_row_count, lastInsertRowid: last_insert_rowid };
+    };
+    return { all: async (...a) => (await exec(a)).rows, get: async (...a) => (await exec(a)).rows[0], run: (...a) => exec(a) };
+  };
+} else {
+  const DATA = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(ROOT, 'data');
+  fs.mkdirSync(DATA, { recursive: true });
+  const db = new DatabaseSync(path.join(DATA, 'pantins.db'));
+  stmt = sql => {
+    const s = db.prepare(sql);
+    return { all: async (...a) => s.all(...a), get: async (...a) => s.get(...a), run: async (...a) => s.run(...a) };
+  };
+}
+await stmt(`CREATE TABLE IF NOT EXISTS pantins (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   parts TEXT NOT NULL,
   created_at TEXT NOT NULL
-)`);
+)`).run();
 /* migration : ip et mode ajoutés sans toucher aux pantins existants, qui restent « inconnu » */
-const cols = db.prepare('PRAGMA table_info(pantins)').all().map(c => c.name);
-if (!cols.includes('ip')) db.exec("ALTER TABLE pantins ADD COLUMN ip TEXT NOT NULL DEFAULT 'inconnu'");
-if (!cols.includes('mode')) db.exec("ALTER TABLE pantins ADD COLUMN mode TEXT NOT NULL DEFAULT 'inconnu'");
-db.exec('CREATE TABLE IF NOT EXISTS bans (ip TEXT PRIMARY KEY, created_at TEXT NOT NULL)');
+const cols = (await stmt('PRAGMA table_info(pantins)').all()).map(c => c.name);
+if (!cols.includes('ip')) await stmt("ALTER TABLE pantins ADD COLUMN ip TEXT NOT NULL DEFAULT 'inconnu'").run();
+if (!cols.includes('mode')) await stmt("ALTER TABLE pantins ADD COLUMN mode TEXT NOT NULL DEFAULT 'inconnu'").run();
+await stmt('CREATE TABLE IF NOT EXISTS bans (ip TEXT PRIMARY KEY, created_at TEXT NOT NULL)').run();
 /* requêtes préparées uniquement : les valeurs ne sont jamais concaténées dans le SQL */
-const qAll = db.prepare('SELECT id, name, parts FROM pantins WHERE id > ? ORDER BY id'); /* public : jamais l'ip */
-const qAdd = db.prepare('INSERT INTO pantins (name, parts, created_at, ip, mode) VALUES (?, ?, ?, ?, ?)');
-const qAdmAll = db.prepare('SELECT id, name, parts, created_at, ip, mode FROM pantins ORDER BY id');
-const qIp = db.prepare('SELECT ip FROM pantins WHERE id = ?');
-const qDel = db.prepare('DELETE FROM pantins WHERE id = ?');
-const qBanned = db.prepare('SELECT 1 FROM bans WHERE ip = ?');
-const qBan = db.prepare('INSERT OR IGNORE INTO bans (ip, created_at) VALUES (?, ?)');
-const qBans = db.prepare('SELECT ip, created_at FROM bans ORDER BY created_at DESC');
-const qUnban = db.prepare('DELETE FROM bans WHERE ip = ?');
+const qAll = stmt('SELECT id, name, parts FROM pantins WHERE id > ? ORDER BY id'); /* public : jamais l'ip */
+const qAdd = stmt('INSERT INTO pantins (name, parts, created_at, ip, mode) VALUES (?, ?, ?, ?, ?)');
+const qAdmAll = stmt('SELECT id, name, parts, created_at, ip, mode FROM pantins ORDER BY id');
+const qIp = stmt('SELECT ip FROM pantins WHERE id = ?');
+const qDel = stmt('DELETE FROM pantins WHERE id = ?');
+const qBanned = stmt('SELECT 1 AS x FROM bans WHERE ip = ?');
+const qBan = stmt('INSERT OR IGNORE INTO bans (ip, created_at) VALUES (?, ?)');
+const qBans = stmt('SELECT ip, created_at FROM bans ORDER BY created_at DESC');
+const qUnban = stmt('DELETE FROM bans WHERE ip = ?');
 
 /* ---------- validation (mêmes règles que le client, qui n'est jamais cru sur parole) ---------- */
 const W = 720, H = 1280; /* taille logique de l'affiche, identique à public/app.js et admin/admin.js */
@@ -99,35 +129,36 @@ function send(res, code, body, type = 'application/json; charset=utf-8', extra =
 }
 /* réponse identique à un fichier absent : une route admin sans session n'existe pas */
 const notFound = res => send(res, 404, 'introuvable', 'text/plain');
-function readBody(req, res, max, cb) {
-  let raw = '', big = false;
+/* corps de la requête, ou null s'il dépasse max octets (la connexion est alors coupée) */
+const readBody = (req, max) => new Promise(ok => {
+  let raw = '';
   req.setEncoding('utf8');
-  req.on('data', d => { raw += d; if (raw.length > max) { big = true; req.destroy(); } });
-  req.on('end', () => { if (!big) cb(raw); });
-}
+  req.on('data', d => { raw += d; if (raw.length > max) { req.destroy(); ok(null); } });
+  req.on('end', () => ok(raw));
+});
 const last = new Map(); /* ip -> date du dernier ajout : un pantin toutes les 5 s par adresse */
 
-function api(req, res, url) {
+async function api(req, res, url) {
   if (req.method === 'GET') {
     const after = Math.max(0, parseInt(url.searchParams.get('after'), 10) || 0);
-    return send(res, 200, qAll.all(after).map(r => ({ id: r.id, name: r.name, parts: JSON.parse(r.parts) })));
+    return send(res, 200, (await qAll.all(after)).map(r => ({ id: r.id, name: r.name, parts: JSON.parse(r.parts) })));
   }
   if (req.method !== 'POST') return send(res, 405, { error: 'méthode' });
   if (!/^application\/json/.test(req.headers['content-type'] || '')) return send(res, 415, { error: 'format' });
   const ip = clientIp(req), now = Date.now();
   /* IP bannie : un refus comme un autre, sans dire pourquoi */
-  if (qBanned.get(ip)) return send(res, 403, { error: 'refusé' });
+  if (await qBanned.get(ip)) return send(res, 403, { error: 'refusé' });
   if (now - (last.get(ip) || 0) < 5000) return send(res, 429, { error: 'trop vite' });
-  readBody(req, res, 8192, raw => {
-    let body;
-    try { body = JSON.parse(raw); } catch { return send(res, 400, { error: 'json' }); }
-    const name = cleanName(body && body.name), parts = cleanParts(body && body.parts);
-    const mode = body && MODES.includes(body.mode) ? body.mode : null;
-    if (name === null || !parts || !mode) return send(res, 400, { error: 'invalide' });
-    last.set(ip, now);
-    const { lastInsertRowid } = qAdd.run(name, JSON.stringify(parts), new Date().toISOString(), ip, mode);
-    send(res, 201, { id: Number(lastInsertRowid) });
-  });
+  const raw = await readBody(req, 8192);
+  if (raw === null) return;
+  let body;
+  try { body = JSON.parse(raw); } catch { return send(res, 400, { error: 'json' }); }
+  const name = cleanName(body && body.name), parts = cleanParts(body && body.parts);
+  const mode = body && MODES.includes(body.mode) ? body.mode : null;
+  if (name === null || !parts || !mode) return send(res, 400, { error: 'invalide' });
+  last.set(ip, now);
+  const { lastInsertRowid } = await qAdd.run(name, JSON.stringify(parts), new Date().toISOString(), ip, mode);
+  send(res, 201, { id: Number(lastInsertRowid) });
 }
 
 function serveFile(req, res, dir, rel, extra = {}) {
@@ -180,26 +211,26 @@ p{margin:0}
 ${msg ? `<p class="t3">${msg}</p>` : ''}
 </form></body></html>`;
 
-function login(req, res) {
+async function login(req, res) {
   const ip = clientIp(req), now = Date.now(), t = tries.get(ip) || { n: 0, until: 0 };
   const page = (code, msg) => send(res, code, loginPage(msg), MIME['.html'], ADMIN_HEADERS);
   if (t.until > now) return page(429, 'Trop d’essais. Réessaie dans ' + Math.ceil((t.until - now) / 60e3) + ' min.');
-  readBody(req, res, 1024, raw => {
-    const pw = new URLSearchParams(raw).get('password') || '';
-    if (!goodPassword(pw)) {
-      t.n++;
-      if (t.n >= MAX_TRIES) { t.n = 0; t.until = now + LOCK_MS; }
-      tries.set(ip, t);
-      return t.until > now ? page(429, 'Trop d’essais. Réessaie dans ' + LOCK_MS / 60e3 + ' min.') : page(401, 'Mot de passe incorrect.');
-    }
-    tries.delete(ip);
-    for (const [k, exp] of sessions) if (exp <= now) sessions.delete(k);
-    const tok = crypto.randomBytes(32).toString('base64url');
-    sessions.set(tok, now + SESSION_MS);
-    res.writeHead(303, { ...HEADERS, ...ADMIN_HEADERS, Location: ADMIN_PATH + '/',
-      'Set-Cookie': `adm=${tok}; Path=/; Max-Age=${SESSION_MS / 1000}; HttpOnly; SameSite=Strict${PROD ? '; Secure' : ''}` });
-    res.end();
-  });
+  const raw = await readBody(req, 1024);
+  if (raw === null) return;
+  const pw = new URLSearchParams(raw).get('password') || '';
+  if (!goodPassword(pw)) {
+    t.n++;
+    if (t.n >= MAX_TRIES) { t.n = 0; t.until = now + LOCK_MS; }
+    tries.set(ip, t);
+    return t.until > now ? page(429, 'Trop d’essais. Réessaie dans ' + LOCK_MS / 60e3 + ' min.') : page(401, 'Mot de passe incorrect.');
+  }
+  tries.delete(ip);
+  for (const [k, exp] of sessions) if (exp <= now) sessions.delete(k);
+  const tok = crypto.randomBytes(32).toString('base64url');
+  sessions.set(tok, now + SESSION_MS);
+  res.writeHead(303, { ...HEADERS, ...ADMIN_HEADERS, Location: ADMIN_PATH + '/',
+    'Set-Cookie': `adm=${tok}; Path=/; Max-Age=${SESSION_MS / 1000}; HttpOnly; SameSite=Strict${PROD ? '; Secure' : ''}` });
+  res.end();
 }
 
 /* ADMIN_PATH/ : connexion sans session, panel avec. Les fichiers du panel n'existent que pour une session */
@@ -207,14 +238,14 @@ function adminPage(req, res, url) {
   if (url.pathname === ADMIN_PATH) return send(res, 301, '', 'text/plain', { Location: ADMIN_PATH + '/' });
   const rel = url.pathname.slice(ADMIN_PATH.length), ok = hasSession(req);
   if (rel === '/') {
-    if (req.method === 'POST') return login(req, res);
+    if (req.method === 'POST') return login(req, res).catch(fail(res));
     if (!ok) return send(res, 200, loginPage(''), MIME['.html'], ADMIN_HEADERS);
   }
   if (!ok) return notFound(res);
   serveFile(req, res, ADM, rel, ADMIN_HEADERS);
 }
 
-function adminApi(req, res, url) {
+async function adminApi(req, res, url) {
   if (!ADMIN || !hasSession(req)) return notFound(res);
   /* en plus de SameSite=Strict : une action venue d'un autre site est refusée */
   const o = req.headers.origin;
@@ -222,35 +253,37 @@ function adminApi(req, res, url) {
   const p = url.pathname.slice('/api/admin'.length), m = req.method;
   let r;
   if (m === 'GET' && p === '/pantins')
-    return send(res, 200, qAdmAll.all().map(r => ({ id: r.id, name: r.name, parts: JSON.parse(r.parts), created_at: r.created_at, ip: r.ip, mode: r.mode })), undefined, ADMIN_HEADERS);
+    return send(res, 200, (await qAdmAll.all()).map(r => ({ id: r.id, name: r.name, parts: JSON.parse(r.parts), created_at: r.created_at, ip: r.ip, mode: r.mode })), undefined, ADMIN_HEADERS);
   if (m === 'DELETE' && (r = /^\/pantins\/(\d{1,15})$/.exec(p))) {
-    const { changes } = qDel.run(+r[1]);
+    const { changes } = await qDel.run(+r[1]);
     return send(res, changes ? 200 : 404, { ok: !!changes });
   }
   /* l'IP à bannir est lue en base, jamais fournie par le client */
   if (m === 'POST' && (r = /^\/pantins\/(\d{1,15})\/ban$/.exec(p))) {
-    const row = qIp.get(+r[1]);
+    const row = await qIp.get(+r[1]);
     if (!row) return send(res, 404, { ok: false });
     if (row.ip === 'inconnu') return send(res, 400, { error: 'ip inconnue' });
-    qBan.run(row.ip, new Date().toISOString());
-    qDel.run(+r[1]);
+    await qBan.run(row.ip, new Date().toISOString());
+    await qDel.run(+r[1]);
     return send(res, 200, { ok: true });
   }
-  if (m === 'GET' && p === '/bans') return send(res, 200, qBans.all().map(r => ({ ip: r.ip, created_at: r.created_at })), undefined, ADMIN_HEADERS);
+  if (m === 'GET' && p === '/bans') return send(res, 200, (await qBans.all()).map(r => ({ ip: r.ip, created_at: r.created_at })), undefined, ADMIN_HEADERS);
   if (m === 'DELETE' && (r = /^\/bans\/([^/]{1,64})$/.exec(p))) {
     let ip;
     try { ip = decodeURIComponent(r[1]); } catch { return send(res, 400, { error: 'ip' }); }
     if (!net.isIP(ip)) return send(res, 400, { error: 'ip' });
-    qUnban.run(ip);
+    await qUnban.run(ip);
     return send(res, 200, { ok: true });
   }
   notFound(res);
 }
 
+/* une erreur (base injoignable…) donne un 500 sans détail ; le détail reste dans les journaux du serveur */
+const fail = res => e => { console.error(e); if (!res.headersSent) send(res, 500, { error: 'serveur' }); else res.destroy(); };
 http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
-  if (url.pathname === '/api/pantins') return api(req, res, url);
-  if (url.pathname === '/api/admin' || url.pathname.startsWith('/api/admin/')) return adminApi(req, res, url);
+  if (url.pathname === '/api/pantins') return api(req, res, url).catch(fail(res));
+  if (url.pathname === '/api/admin' || url.pathname.startsWith('/api/admin/')) return adminApi(req, res, url).catch(fail(res));
   if (ADMIN && (url.pathname === ADMIN_PATH || url.pathname.startsWith(ADMIN_PATH + '/'))) return adminPage(req, res, url);
   serveFile(req, res, PUB, url.pathname);
 }).listen(PORT, () => console.log(`Affiche : http://localhost:${PORT}` + (ADMIN ? ` (panel admin actif)` : '')));

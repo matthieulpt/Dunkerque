@@ -1,0 +1,25 @@
+# Déploiement Render (offre gratuite). Les carnavaliers sont stockés chez Turso, pas sur Render.
+# Les valeurs secrètes (sync: false) sont demandées par Render à la création, jamais écrites ici.
+services:
+  - type: web
+    name: carnaval-dunkerque
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "22.14.0"
+      - key: NODE_ENV
+        value: production
+      - key: TRUST_PROXY
+        value: "1"
+      - key: ADMIN_PATH
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false

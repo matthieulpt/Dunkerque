@@ -2,7 +2,7 @@
   "name": "affiche-carnaval-dunkerque",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22.9" },
+  "engines": { "node": ">=22.13" },
   "scripts": {
     "start": "node --env-file-if-exists=.env server.js"
   }
