@@ -311,7 +311,8 @@ function frame(now) {
 
 /* ---------- nom au survol ---------- */
 const tip = document.getElementById('tip');
-cv.addEventListener('pointermove', e => {
+/* au doigt : toucher un carnavalier affiche son nom, toucher ailleurs l'efface */
+function showTip(e) {
   if (cam.mode !== 'full') { tip.hidden = true; return; }
   const d = window.devicePixelRatio || 1, r = cv.getBoundingClientRect();
   const x = ((e.clientX - r.left) * d - cv.width / 2) / vw.s + vw.x, y = ((e.clientY - r.top) * d - cv.height / 2) / vw.s + vw.y;
@@ -323,8 +324,10 @@ cv.addEventListener('pointermove', e => {
     }
   tip.hidden = !(hit && hit.name);
   if (!tip.hidden) { tip.textContent = hit.name; tip.style.left = e.clientX + 'px'; tip.style.top = e.clientY + 'px'; }
-});
-cv.addEventListener('pointerleave', () => { tip.hidden = true; });
+}
+cv.addEventListener('pointermove', showTip);
+cv.addEventListener('pointerdown', e => { if (e.pointerType !== 'mouse') showTip(e); });
+cv.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse') tip.hidden = true; });
 
 /* ---------- éditeur de personnage ---------- */
 /* balise SVG d'une forme, centrée sur son origine */
@@ -353,8 +356,16 @@ function renderPreview() {
   });
   const m = 0.5; /* marge en haut et en bas seulement : en largeur, le cadre colle au pantin (voir fitMid) */
   pv.setAttribute('viewBox', `${fx(x0)} ${fx(y0 - m)} ${fx(x1 - x0)} ${fx(y1 - y0 + 2 * m)}`);
-  pv.innerHTML = s.map((sh, i) => `<g data-p="${i}" transform="translate(${fx(pos[i].x)} ${fx(pos[i].y)})">${shapeTag(sh, ed[i].c)}</g>`).join('');
+  pv.innerHTML = s.map((sh, i) => `<g data-p="${i}"${i === sel ? ' class="hot"' : ''} transform="translate(${fx(pos[i].x)} ${fx(pos[i].y)})">${shapeTag(sh, ed[i].c)}</g>`).join('');
 }
+/* au doigt, glisser cache la cible : on peut aussi toucher un morceau (il reste surligné)
+   puis toucher une forme ou une couleur pour la lui appliquer */
+let sel = null;
+pv.addEventListener('click', e => {
+  const g = e.target.closest('[data-p]'), i = g ? +g.dataset.p : null;
+  sel = i === sel ? null : i;
+  renderPreview();
+});
 /* sources à glisser : une icône par forme, une pastille par couleur */
 const shapesEl = document.getElementById('shapes'), palEl = document.getElementById('pal');
 for (const k of KINDS) {
@@ -379,21 +390,25 @@ function startDrag(e, node, val) {
   const r = node.getBoundingClientRect(), gh = node.cloneNode(true);
   gh.classList.add('ghost'); gh.style.width = r.width + 'px'; gh.style.height = r.height + 'px';
   document.body.appendChild(gh);
-  drag = { gh, val, hot: null };
+  drag = { gh, val, hot: null, node, over: true };
   moveDrag(e);
 }
 function moveDrag(e) {
   drag.gh.style.left = e.clientX + 'px'; drag.gh.style.top = e.clientY + 'px';
   const el = document.elementFromPoint(e.clientX, e.clientY), hot = el && el.closest('#pv [data-p]');
+  drag.over = !!el && drag.node.contains(el);
   if (hot === drag.hot) return;
-  if (drag.hot) drag.hot.classList.remove('hot');
+  if (drag.hot && +drag.hot.dataset.p !== sel) drag.hot.classList.remove('hot');
   if (hot) hot.classList.add('hot');
   drag.hot = hot;
 }
 window.addEventListener('pointermove', e => { if (drag) moveDrag(e); });
 window.addEventListener('pointerup', () => {
   if (!drag) return;
-  if (drag.hot) { Object.assign(ed[+drag.hot.dataset.p], drag.val); renderPreview(); }
+  /* relâché sur la source elle-même : simple toucher, appliqué au morceau sélectionné */
+  const i = drag.hot ? +drag.hot.dataset.p : drag.over ? sel : null;
+  if (i !== null) Object.assign(ed[i], drag.val);
+  renderPreview();
   drag.gh.remove(); drag = null;
 });
 window.addEventListener('pointercancel', () => { if (drag) { drag.gh.remove(); drag = null; renderPreview(); } });
@@ -442,8 +457,18 @@ function ask(msg, yes, fn) {
   document.getElementById('yes').textContent = yes;
   onYes = fn; pop.hidden = false;
 }
-function launch(spec) {
+/* l'éditeur occupe une entrée d'historique : le bouton retour du téléphone le ferme (Échap à l'ordinateur) */
+function closeEd() {
   pop.hidden = true; edEl.hidden = true;
+  if (history.state && history.state.ed) history.back();
+}
+window.addEventListener('popstate', () => {
+  if (edEl.hidden) return;
+  if (!pop.hidden) { pop.hidden = true; history.pushState({ ed: 1 }, ''); } /* retour ferme d'abord la question */
+  else edEl.hidden = true;
+});
+function launch(spec) {
+  closeEd();
   const c = spawn(spec);
   c.mine = true; c.mode = spec ? 'editeur' : 'aleatoire'; c.name =finalName() || (spec ? '' : NAMES[Math.floor(Math.random() * NAMES.length)]);
   nameEl.value = ''; genBtn.disabled = true;
@@ -462,9 +487,13 @@ checkReste().catch(() => {});
 /* revérifié juste avant de lancer : un autre onglet ou un autre appareil du même réseau a pu poser entre-temps */
 const go = spec => checkReste().catch(() => {}).then(() => {
   if (reste) return launch(spec);
-  pop.hidden = true; edEl.hidden = true;
+  closeEd();
 });
-joinEl.onclick = () => { if (cam.mode === 'full' && reste) { tip.hidden = true; edEl.hidden = false; fitMid(); } };
+joinEl.onclick = () => {
+  if (cam.mode !== 'full' || !reste) return;
+  tip.hidden = true; sel = null; renderPreview(); edEl.hidden = false; fitMid();
+  history.pushState({ ed: 1 }, '');
+};
 genBtn.onclick = () => ask('Ton carnavalier est-il à ton goût ?', 'Générer', () => go(ed.map(p => ({ ...p }))));
 document.getElementById('rnd').onclick = () => ask('Un carnavalier aléatoire va être créé. Si tu es sûr de ne pas vouloir créer le tien, appuie sur continuer.', 'Continuer', () => go(null));
 document.getElementById('yes').onclick = () => onYes();
@@ -472,7 +501,7 @@ document.getElementById('no').onclick = () => { pop.hidden = true; };
 window.addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
   if (!pop.hidden) pop.hidden = true;
-  else edEl.hidden = true;
+  else if (!edEl.hidden) closeEd();
 });
 
 layout();

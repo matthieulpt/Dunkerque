@@ -11,16 +11,18 @@
 .t3{font:400 16px/1.3 Helvetica,"Helvetica Neue",Arial,sans-serif}
 html,body{margin:0;height:100%;background:#fff;color:#000;overflow:hidden}
 [hidden]{display:none!important}
-.b{background:#fff;color:#000;border:1px solid #000;border-radius:0;cursor:pointer;margin:0;padding:20px;letter-spacing:0;text-align:left}
-.b:hover:not(:disabled){background:#000;color:#fff}
+.b{background:#fff;color:#000;border:1px solid #000;border-radius:0;cursor:pointer;margin:0;padding:20px;letter-spacing:0;text-align:left;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+/* survol seulement à la souris : au doigt, il resterait collé après le toucher */
+@media (hover:hover){.b:hover:not(:disabled){background:#000;color:#fff}}
+.b:active:not(:disabled){background:#000;color:#fff}
 .b:disabled{opacity:.25;cursor:default}
 .row{display:flex;gap:16px}
 .row .b{flex:1;text-align:center}
 
 /* accueil : l'affiche au milieu, l'invitation à gauche */
 #home{position:fixed;inset:0;display:grid;grid-template-columns:1fr calc((100dvh - 32px) * 9 / 16) 1fr;gap:16px;padding:16px;box-sizing:border-box}
-#side{display:flex;align-items:center;justify-content:center}
-#join{padding:24px 32px;text-transform:uppercase;white-space:nowrap}
+#side{display:flex;align-items:center;justify-content:center;min-width:0}
+#join{padding:24px 32px;text-transform:uppercase;max-width:100%;text-align:center}
 #home.busy #join,#home.busy #done{visibility:hidden}
 #done{margin:0}
 #pane{position:relative;min-width:0;min-height:0}
@@ -40,10 +42,14 @@ html,body{margin:0;height:100%;background:#fff;color:#000;overflow:hidden}
 #name{border:1px solid #000;border-radius:0;padding:20px;margin:0;outline:none;background:#fff;color:#000}
 #name::placeholder{color:#000;opacity:.4}
 .src{min-height:0;overflow:hidden;border:1px solid #000;box-sizing:border-box;display:flex;align-items:center;justify-content:center;cursor:grab;touch-action:none;user-select:none;background:#fff}
-.src:hover{background:#000}
-.src:hover svg{fill:#fff}
+.src{-webkit-tap-highlight-color:transparent}
 .src svg{height:60%;fill:#000}
-#pal .src:hover{outline:3px solid #000;outline-offset:-8px}
+@media (hover:hover){
+  .src:hover{background:#000}
+  .src:hover svg{fill:#fff}
+  #pal .src:hover{outline:3px solid #000;outline-offset:-8px}
+}
+#pv{-webkit-tap-highlight-color:transparent}
 .ghost{position:fixed;pointer-events:none;z-index:9;transform:translate(-50%,-50%);margin:0;opacity:.85}
 
 /* confirmation */
@@ -53,9 +59,12 @@ html,body{margin:0;height:100%;background:#fff;color:#000;overflow:hidden}
 
 /* écran vertical (téléphone, borne) : tout s'empile */
 @media (max-aspect-ratio: 1/1){
-  #home{grid-template-columns:1fr;grid-template-rows:1fr auto}
+  #home{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr) auto}
+  #home>div:last-child{display:none}
   #side{order:2;justify-content:stretch}
-  #join{max-width:none;width:100%}
+  #join{width:100%;padding:20px}
+  #done{width:100%;text-align:center}
+  #tip{transform:translate(-50%,-150%)}
   /* pantin, formes, couleurs, nom, boutons */
   #ed{grid-template-columns:1fr;grid-template-rows:minmax(0,1fr) auto auto auto auto;gap:8px}
   #mid{display:contents}
